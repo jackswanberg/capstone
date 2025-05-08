@@ -265,6 +265,7 @@ class StudentTDDPM:
 #        Training Loop
 # ================================
 def train_ddpm(model, ddpm, dataloader, epochs=50):
+    print("Entered training")
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     model.train()
     for epoch in tqdm(range(epochs)):
@@ -282,15 +283,19 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
 def main(rank, world_size):
+    print("Entering main")
     setup_ddp(rank, world_size)
-
+    print("Setup ddp")
     # Device
-    device = torch.device(f"cuda:{rank}")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
+    print(f"Using device: {device}")
 
     # Model + DDP
     model = UNet(in_channels=3, base_channels=128).to(device)
-    model = DDP(model, device_ids=[rank])
+    model = DDP(model, device_ids=[local_rank])
+    print(f"Setup model")
     
     betas = linear_beta_schedule(timesteps=400)
     ddpm = StudentTDDPM(model, betas, nu=4.0)
@@ -300,10 +305,11 @@ def main(rank, world_size):
         transforms.ToTensor(),
         ToMinusOneToOne()
     ])
+
     dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4, pin_memory=True)
-
+    print("Setup dataloader")
     # Train
     train_ddpm(model, ddpm, train_loader, epochs=300)
 
