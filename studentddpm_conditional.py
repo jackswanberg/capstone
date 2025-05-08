@@ -33,7 +33,7 @@ transform = transforms.Compose([
 ])
 train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
 num_classes = len(train_data.classes)
-train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=4)
+train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=4,pin_memory=True,persistent_workers=True)
 
 # ================================
 #       Linear Beta Schedule
@@ -318,6 +318,7 @@ def main(rank, world_size):
 # ================================
 if __name__ == "__main__":
     world_size = torch.cuda.device_count()
+    print(f"World size = {world_size}")
     torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)
 
 
