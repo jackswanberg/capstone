@@ -122,7 +122,8 @@ class UNet(nn.Module):
 
     def forward(self, x, label, t):
         label_emb = self.label_emb(label)
-        t_emb = self.time_embedding(t) + label_emb
+        t_emb = self.time_embedding(t)
+        t_emb = t_emb + label_emb
 
 
         # Down
@@ -157,13 +158,15 @@ def student_t_nll(x, mu, nu=4.0):
 # ================================
 #      Visualization Functions
 # ================================
-def visualize_denoising(ddpm, steps_to_show=[0, 25, 50, 75, 99]):
-    x = torch.randn((1, 3, 32, 32)).to(ddpm.device)
+def visualize_denoising(ddpm, label, steps_to_show=[0, 25, 50, 75, 99]):
+    x = torch.randn((10, 3, 32, 32)).to(ddpm.device)
+    label = torch.tensor([label], device=ddpm.device)
+    # label = torch.arange(0,10,device=ddpm.device,dtype=torch.long)
     images = []
 
     for t in reversed(range(ddpm.timesteps)):
         t_batch = torch.tensor([t]).to(ddpm.device)
-        x = ddpm.p_sample(x, t_batch)
+        x = ddpm.p_sample(x, label, t_batch)
         if t in steps_to_show:
             img = torch.clamp((x[0] + 1) / 2, 0, 1).cpu()
             images.append(img)
@@ -174,6 +177,30 @@ def visualize_denoising(ddpm, steps_to_show=[0, 25, 50, 75, 99]):
     plt.title("Denoising Progression")
     plt.axis("off")
     plt.show()
+
+def visualize_one_sample_per_class(ddpm):
+    ddpm.model.eval()
+    with torch.no_grad():
+        class_labels = torch.arange(10).to(ddpm.device)
+        samples = ddpm.sample(class_labels, (10, 3, 32, 32)).cpu()
+        samples = (samples + 1) / 2  # De-normalize to [0, 1]
+
+        class_names = [
+            "airplane", "automobile", "bird", "cat", "deer",
+            "dog", "frog", "horse", "ship", "truck"
+        ]
+
+        fig, axes = plt.subplots(1, 10, figsize=(15, 2))
+        for i, ax in enumerate(axes):
+            img = samples[i]
+            ax.imshow(img.permute(1, 2, 0))
+            ax.axis("off")
+            ax.set_title(class_names[i], fontsize=8)
+        plt.tight_layout()
+        plt.show()
+
+# Call the function
+
 
 # ================================
 #     Student-t Based DDPM
@@ -239,7 +266,7 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             loss.backward()
             optimizer.step()
         if epoch%10==0:
-            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}"
+            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
@@ -248,7 +275,7 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
 # ================================
 if __name__=="__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    timesteps = 100
+    timesteps = 400
     betas = linear_beta_schedule(timesteps)
     model = UNet(in_channels=3,base_channels=128).to(device)
     ddpm = StudentTDDPM(model, betas, nu=4.0)
@@ -274,19 +301,21 @@ if __name__=="__main__":
     ########################################################################################
     ############### TRAINING ###############################################################
     ########################################################################################
-    
-    train_ddpm(model, ddpm, train_loader, epochs=30)
+    model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
+    train_ddpm(model, ddpm, train_loader, epochs=500)
     torch.save(model.state_dict(),"model_saves/student_t_UNET_conditional.pth")
 
-    # model.load_state_dict(torch.load("model_saves/student_t_mseloss.pth"))
+    # model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
 
-    visualize_denoising(ddpm)
-
-    # sample_labels = torch.full((16,), 0, dtype=torch.long).to(device)
-    sample_labels = torch.randint(0,10,(16,0))
-    samples = ddpm.sample(sample_labels(16, 3, 32, 32)).cpu()
-    grid = torch.clamp((samples + 1) / 2, 0, 1)  # Convert back to [0, 1]
-    grid = torchvision.utils.make_grid(grid, nrow=4)
-    plt.imshow(grid.permute(1, 2, 0))
-    plt.axis("off")
-    plt.show()
+    # class_label = 1
+    # visualize_denoising(ddpm, class_label)
+    # visualize_one_sample_per_class(ddpm)
+    # # sample_labels = torch.full((16,), 0, dtype=torch.long).to(device)
+    # sample_labels = torch.randint(0,10,(16,1)).to(device).squeeze()
+    # print(sample_labels.shape)
+    # samples = ddpm.sample(sample_labels,(16, 3, 32, 32)).cpu()
+    # grid = torch.clamp((samples + 1) / 2, 0, 1)  # Convert back to [0, 1]
+    # grid = torchvision.utils.make_grid(grid, nrow=4)
+    # plt.imshow(grid.permute(1, 2, 0))
+    # plt.axis("off")
+    # plt.show()
