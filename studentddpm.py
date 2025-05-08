@@ -110,7 +110,7 @@ class StudentTDDPM:
 # ================================
 #        Training Loop
 # ================================
-def train_ddpm(model, ddpm, dataloader, epochs=50):
+def train_ddpm(model, ddpm, dataloader, epochs=200):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     model.train()
     for epoch in tqdm(range(epochs)):
