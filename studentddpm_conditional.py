@@ -239,7 +239,7 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             loss.backward()
             optimizer.step()
         if epoch%10==0:
-            model_save_file = f"model_saves/studenttddpm_epoch{epoch}"
+            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
@@ -247,7 +247,7 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
 #         Run Training
 # ================================
 if __name__=="__main__":
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timesteps = 100
     betas = linear_beta_schedule(timesteps)
     model = UNet(in_channels=3,base_channels=128).to(device)

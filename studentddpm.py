@@ -242,7 +242,7 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
 #         Run Training
 # ================================
 if __name__=="__main__":
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timesteps = 100
     betas = linear_beta_schedule(timesteps)
     model = UNet(in_channels=3,base_channels=128).to(device)
