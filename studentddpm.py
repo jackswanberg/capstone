@@ -121,6 +121,9 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+        if epoch%10==0:
+            model_save_file = f"model_saves/studenttddpm_epoch{epoch}"
+            torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
 # ================================
