@@ -56,6 +56,9 @@ class ConvNet(nn.Module):
 def extract(a, t, x_shape):
     return a.gather(-1, t).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
 
+def student_t_nll(x, mu, nu=4.0):
+    return torch.log(1 + ((x - mu) ** 2) / nu).mean()
+
 # ================================
 #     Student-t Based DDPM
 # ================================
@@ -79,18 +82,23 @@ class StudentTDDPM:
         x_noisy = self.q_sample(x_start, t)
         noise = StudentT(df=self.nu, loc=0, scale=1).sample(x_start.shape).to(self.device)
         predicted = self.model(x_noisy, t)
-        return F.mse_loss(predicted, noise)
+        return student_t_nll(noise,predicted,self.nu)
+        # return F.mse_loss(predicted, noise)
 
     def p_sample(self, x, t):
         betas_t = extract(self.betas, t, x.shape)
+        alphas_t = extract(self.alphas,t,x.shape)
         alpha_bar_t = extract(self.alpha_bars, t, x.shape)
         predicted_noise = self.model(x, t)
 
-        mean = (x - torch.sqrt(1 - alpha_bar_t) * predicted_noise) / torch.sqrt(alpha_bar_t)
+        mean = (1 / torch.sqrt(alphas_t)) * (
+                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
+
         if t[0] == 0:
             return mean
         noise = StudentT(df=self.nu, loc=0, scale=1).sample(x.shape).to(self.device)
-        return torch.sqrt(self.alphas[t]) * mean + torch.sqrt(betas_t) * noise
+
+        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
 
     def sample(self, shape):
         x = torch.randn(shape).to(self.device)
@@ -120,12 +128,14 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
 # ================================
 if __name__=="__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-    timesteps = 1000
+    timesteps = 100
     betas = linear_beta_schedule(timesteps)
     model = ConvNet().to(device)
     ddpm = StudentTDDPM(model, betas, nu=4.0)
 
     train_ddpm(model, ddpm, train_loader, epochs=30)
+
+    torch.save(model.state_dict(),"model_saves/student_t.pth")
 
     samples = ddpm.sample((16, 3, 32, 32)).cpu()
     grid = torch.clamp((samples + 1) / 2, 0, 1)  # Convert back to [0, 1]
