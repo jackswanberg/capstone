@@ -35,6 +35,8 @@ def main():
 
 def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
+    local_rank = args.gpu
+    world_size = args.world_size
 
     # Initialize the process group
     # dist.init_process_group(backend='nccl', init_method=args.dist_url,
@@ -47,14 +49,20 @@ def main_worker(gpu, ngpus_per_node, args):
     transform = transforms.Compose([
     transforms.ToTensor(),
     ToMinusOneToOne()  # Normalize to [-1, 1]
-])
+    ])
     train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
     num_classes = len(train_data.classes)
-    train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=args.workers,pin_memory=True,persistent_workers=True,worker_init_fn=worker_init_fn)
+    train_loader = DataLoader(train_data, 
+                              batch_size=args.batch_size, 
+                              shuffle=True,num_workers=args.workers,
+                              pin_memory=True,
+                              persistent_workers=True,
+                              worker_init_fn=worker_init_fn)
 
     # Model + DDP
     model = UNet(in_channels=3, base_channels=128).to(device)
-    model = DDP(model, device_ids=[local_rank])
+    model = torch.compile(model)
+    # model = DDP(model, device_ids=[local_rank])
     print(f"Setup model")
     
     betas = linear_beta_schedule(timesteps=400)
@@ -65,13 +73,8 @@ def main_worker(gpu, ngpus_per_node, args):
         transforms.ToTensor(),
         ToMinusOneToOne()
     ])
-
-    dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4, pin_memory=True)
-    print("Setup dataloader")
     # Train
-    train_ddpm(model, ddpm, train_loader, epochs=300)
+    train_ddpm(model, ddpm, train_loader, epochs=args.epochs)
 
     # Save only from rank 0
     if rank == 0:
@@ -92,14 +95,6 @@ class ToMinusOneToOne:
     def __call__(self, x):
         return x * 2. - 1.
     
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    ToMinusOneToOne()  # Normalize to [-1, 1]
-])
-train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-num_classes = len(train_data.classes)
-train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=args.workers,pin_memory=True,persistent_workers=True,worker_init_fn=worker_init_fn)
-
 # ================================
 #       Linear Beta Schedule
 # ================================
