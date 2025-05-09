@@ -7,18 +7,83 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torch.distributions.studentT import StudentT
+import argparse
 import numpy as np
 import os
+
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
 
-def setup_ddp(rank, world_size):
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
 
-def cleanup_ddp():
-    dist.destroy_process_group()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--epochs', default=100, type=int, help='Number of total epochs to run')
+    parser.add_argument('--batch_size', default=256, type=int, help='Batch size per GPU')
+    parser.add_argument('--workers', default=8, type=int, help='Number of data loading workers')
+    parser.add_argument('--dist_url', default='env://', help='URL used to set up distributed training')
+    parser.add_argument('--world_size', default=1, type=int, help='Number of nodes for distributed training')
+    args = parser.parse_args()
 
+    # Set the random seed for reproducibility
+    torch.manual_seed(42)
+
+    # Launch the training process
+    ngpus_per_node = torch.cuda.device_count()
+    args.world_size = ngpus_per_node * args.world_size
+    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+
+def main_worker(gpu, ngpus_per_node, args):
+    args.gpu = gpu
+
+    # Initialize the process group
+    # dist.init_process_group(backend='nccl', init_method=args.dist_url,
+    #                         world_size=args.world_size, rank=args.gpu)
+
+    # Set the device
+    torch.cuda.set_device(args.gpu)
+    device = torch.device(f'cuda:{args.gpu}')
+
+    transform = transforms.Compose([
+    transforms.ToTensor(),
+    ToMinusOneToOne()  # Normalize to [-1, 1]
+])
+    train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    num_classes = len(train_data.classes)
+    train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=args.workers,pin_memory=True,persistent_workers=True,worker_init_fn=worker_init_fn)
+
+    # Model + DDP
+    model = UNet(in_channels=3, base_channels=128).to(device)
+    model = DDP(model, device_ids=[local_rank])
+    print(f"Setup model")
+    
+    betas = linear_beta_schedule(timesteps=400)
+    ddpm = StudentTDDPM(model, betas, nu=4.0)
+
+    # Dataset + Sampler
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        ToMinusOneToOne()
+    ])
+
+    dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4, pin_memory=True)
+    print("Setup dataloader")
+    # Train
+    train_ddpm(model, ddpm, train_loader, epochs=300)
+
+    # Save only from rank 0
+    if rank == 0:
+        torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
+
+def worker_init_fn(worker_id):
+    """
+    Worker initialization function for DataLoader.
+    """
+    worker_info = torch.utils.data.get_worker_info()
+    dataset = worker_info.dataset
+    dataset._initialize_dataset()
 
 # ================================
 #         CIFAR10 Dataset
@@ -33,7 +98,7 @@ transform = transforms.Compose([
 ])
 train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
 num_classes = len(train_data.classes)
-train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=4,pin_memory=True,persistent_workers=True)
+train_loader = DataLoader(train_data, batch_size=128, shuffle=True,num_workers=args.workers,pin_memory=True,persistent_workers=True,worker_init_fn=worker_init_fn)
 
 # ================================
 #       Linear Beta Schedule
@@ -282,9 +347,9 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
-def main(rank, world_size):
+def main2(rank, world_size):
     print("Entering main")
-    setup_ddp(rank, world_size)
+    # setup_ddp(rank, world_size)
     print("Setup ddp")
     # Device
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -317,17 +382,18 @@ def main(rank, world_size):
     if rank == 0:
         torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
 
-    cleanup_ddp()
+    # cleanup_ddp()
 
 # ================================
 #         Run Training
 # ================================
 if __name__ == "__main__":
-    world_size = torch.cuda.device_count()
-    dist.init_process_group(backend="nccl")
-    world_size = dist.get_world_size()
-    print(f"World size = {world_size}")
-    torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)
+    # world_size = torch.cuda.device_count()
+    # dist.init_process_group(backend="nccl")
+    # world_size = dist.get_world_size()
+    # print(f"World size = {world_size}")
+    # torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)
+    main()
 
 
 # if __name__=="__main__":
