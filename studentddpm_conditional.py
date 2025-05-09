@@ -16,78 +16,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', default=100, type=int, help='Number of total epochs to run')
-    parser.add_argument('--batch_size', default=256, type=int, help='Batch size per GPU')
-    parser.add_argument('--workers', default=8, type=int, help='Number of data loading workers')
-    parser.add_argument('--dist_url', default='env://', help='URL used to set up distributed training')
-    parser.add_argument('--world_size', default=1, type=int, help='Number of nodes for distributed training')
-    args = parser.parse_args()
-
-    # Set the random seed for reproducibility
-    torch.manual_seed(42)
-
-    # Launch the training process
-    ngpus_per_node = torch.cuda.device_count()
-    args.world_size = ngpus_per_node * args.world_size
-    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-
-def main_worker(gpu, ngpus_per_node, args):
-    args.gpu = gpu
-    local_rank = args.gpu
-    world_size = args.world_size
-
-    # Initialize the process group
-    # dist.init_process_group(backend='nccl', init_method=args.dist_url,
-    #                         world_size=args.world_size, rank=args.gpu)
-
-    # Set the device
-    torch.cuda.set_device(args.gpu)
-    device = torch.device(f'cuda:{args.gpu}')
-
-    transform = transforms.Compose([
-    transforms.ToTensor(),
-    ToMinusOneToOne()  # Normalize to [-1, 1]
-    ])
-    train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    num_classes = len(train_data.classes)
-    train_loader = DataLoader(train_data, 
-                              batch_size=args.batch_size, 
-                              shuffle=True,num_workers=args.workers,
-                              pin_memory=True,
-                              persistent_workers=True,
-                              worker_init_fn=worker_init_fn)
-
-    # Model + DDP
-    model = UNet(in_channels=3, base_channels=128).to(device)
-    model = torch.compile(model)
-    # model = DDP(model, device_ids=[local_rank])
-    print(f"Setup model")
-    
-    betas = linear_beta_schedule(timesteps=400)
-    ddpm = StudentTDDPM(model, betas, nu=4.0)
-
-    # Dataset + Sampler
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        ToMinusOneToOne()
-    ])
-    # Train
-    train_ddpm(model, ddpm, train_loader, epochs=args.epochs)
-
-    # Save only from rank 0
-    if rank == 0:
-        torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
-
-def worker_init_fn(worker_id):
-    """
-    Worker initialization function for DataLoader.
-    """
-    worker_info = torch.utils.data.get_worker_info()
-    dataset = worker_info.dataset
-    dataset._initialize_dataset()
-
 # ================================
 #         CIFAR10 Dataset
 # ================================
@@ -342,9 +270,19 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
-def main2(rank, world_size):
+def setup_ddp(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+
+def cleanup_ddp():
+    dist.destroy_process_group()
+
+def main(rank, world_size):
     print("Entering main")
-    # setup_ddp(rank, world_size)
+    setup_ddp(rank, world_size)
     print("Setup ddp")
     # Device
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -377,63 +315,10 @@ def main2(rank, world_size):
     if rank == 0:
         torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
 
-    # cleanup_ddp()
+    cleanup_ddp()
 
 # ================================
 #         Run Training
 # ================================
 if __name__ == "__main__":
-    # world_size = torch.cuda.device_count()
-    # dist.init_process_group(backend="nccl")
-    # world_size = dist.get_world_size()
-    # print(f"World size = {world_size}")
-    # torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)
     main()
-
-
-# if __name__=="__main__":
-#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#     timesteps = 400
-#     betas = linear_beta_schedule(timesteps)
-#     model = UNet(in_channels=3,base_channels=128).to(device)
-#     ddpm = StudentTDDPM(model, betas, nu=4.0)
-
-    ########################################################################################
-    ############### EXAMPLE FOR NOISING PROCESS ############################################
-    ########################################################################################
-    # example = train_loader.dataset[0][0].to(device).unsqueeze(dim=0)
-    # print(example)
-    # steps = torch.Tensor([0,4,8,12,16,20]).to(device)
-    # for t in torch.arange(0,40,8):
-    #     t = t.to(device).unsqueeze(dim=0)
-    #     print(t.shape)
-    #     # t = torch.randint(0, ddpm.timesteps, (example.size(0),), device=ddpm.device)
-    #     print(t.shape)
-    #     noisy_sample = ddpm.q_sample(example,t).cpu()
-    #     noisy_sample = torch.clamp((noisy_sample + 1) / 2, 0, 1)
-    #     print(f"Timestep: {t}")
-    #     plt.figure()
-    #     plt.imshow(noisy_sample[0].permute(1,2,0))
-    #     plt.show()
-
-    ########################################################################################
-    ############### TRAINING ###############################################################
-    ########################################################################################
-    # model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
-    # train_ddpm(model, ddpm, train_loader, epochs=500)
-    # torch.save(model.state_dict(),"model_saves/student_t_UNET_conditional.pth")
-
-    # model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
-
-    # class_label = 1
-    # visualize_denoising(ddpm, class_label)
-    # visualize_one_sample_per_class(ddpm)
-    # # sample_labels = torch.full((16,), 0, dtype=torch.long).to(device)
-    # sample_labels = torch.randint(0,10,(16,1)).to(device).squeeze()
-    # print(sample_labels.shape)
-    # samples = ddpm.sample(sample_labels,(16, 3, 32, 32)).cpu()
-    # grid = torch.clamp((samples + 1) / 2, 0, 1)  # Convert back to [0, 1]
-    # grid = torchvision.utils.make_grid(grid, nrow=4)
-    # plt.imshow(grid.permute(1, 2, 0))
-    # plt.axis("off")
-    # plt.show()
