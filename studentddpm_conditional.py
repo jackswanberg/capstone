@@ -280,19 +280,21 @@ def setup_ddp(rank, world_size):
 def cleanup_ddp():
     dist.destroy_process_group()
 
-def main(rank, world_size):
+def main():
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+
     print("Entering main")
     setup_ddp(rank, world_size)
     print("Setup ddp")
     # Device
-    local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     print(f"Using device: {device}")
 
     # Model + DDP
     model = UNet(in_channels=3, base_channels=128).to(device)
-    model = DDP(model, device_ids=[local_rank])
+    model = DDP(model, device_ids=[rank])
     print(f"Setup model")
     
     betas = linear_beta_schedule(timesteps=400)
@@ -321,4 +323,5 @@ def main(rank, world_size):
 #         Run Training
 # ================================
 if __name__ == "__main__":
-    main()
+    world_size = torch.cuda.device_count()
+    mp.spawn(main, args=(world_size,), nprocs=world_size)
