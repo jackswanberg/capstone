@@ -236,7 +236,7 @@ def main(rank, world_size):
         transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276))
     ])
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
-    num_classes = len(dataset.classes)
+    num_classes = dataset.num_classes
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
