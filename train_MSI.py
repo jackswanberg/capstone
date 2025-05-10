@@ -248,15 +248,15 @@ def main(rank, world_size):
 
     # === Training ===
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
-    scheduler = GeneralizedDDPMScheduler(...)  # Your custom scheduler
+    ddpm = StudentTDDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(200):
         sampler.set_epoch(epoch)
         for x, y in dataloader:
-            x = x.to(rank)
-            t = torch.randint(0, scheduler.num_train_timesteps, (x.size(0),), device=x.device)
-            noise = scheduler.sample_noise(x.shape, x.device)
-            x_noisy = scheduler.add_noise(x, noise, t)
+            x = batch[0].to(ddpm.device)
+            label = batch[1].to(ddpm.device)
+            t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
+            loss = ddpm.p_losses(x, label, t)
 
             # Forward pass and loss
             out = model(x_noisy, t, y)
