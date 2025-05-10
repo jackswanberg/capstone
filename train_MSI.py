@@ -112,7 +112,7 @@ class ResidualBlock(nn.Module):
         return h + self.residual_conv(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, base_channels=64, time_emb_dim=256):
+    def __init__(self, in_channels=3, base_channels=64, num_classes = 100, time_emb_dim=256):
         super().__init__()
         self.time_embedding = nn.Sequential(
             SinusoidalPositionEmbeddings(time_emb_dim),
@@ -236,11 +236,13 @@ def main(rank, world_size):
         transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276))
     ])
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
+    num_classes = len(dataset.classes)
+
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
 
     # === Model ===
-    model = UNet(in_channels=3, base_channels=128).to(device)
+    model = UNet(in_channels=3, base_channels=128,num_classes=num_classes).to(device)
     model = model.to(rank)
     model = DDP(model, device_ids=[rank])
 
