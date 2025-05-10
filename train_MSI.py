@@ -248,6 +248,8 @@ def main(rank, world_size):
 
     # === Training ===
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    betas = linear_beta_schedule(timesteps=400)
+
     ddpm = StudentTDDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(200):
