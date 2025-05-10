@@ -1,6 +1,15 @@
+import torch
 from torchvision.datasets import CIFAR100
 from torchvision import transforms
 from torch.utils.data import Dataset
+import torch.multiprocessing as mp
+
+
+import torch.distributed as dist
+import os, torch, torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from torchvision import transforms
 import numpy as np
 import os
 import pickle
@@ -47,11 +56,7 @@ class CIFAR100LongTail(Dataset):
         return len(self.labels)
 
 def main(rank, world_size):
-    import torch.distributed as dist
-    import os, torch, torch.nn as nn
-    from torch.nn.parallel import DistributedDataParallel as DDP
-    from torch.utils.data import DataLoader, DistributedSampler
-    from torchvision import transforms
+
 
     # === DDP Init ===
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -97,6 +102,5 @@ def main(rank, world_size):
     dist.destroy_process_group()
 
 if __name__ == "__main__":
-    import torch.multiprocessing as mp
     world_size = torch.cuda.device_count()
     mp.spawn(main, args=(world_size,), nprocs=world_size)
