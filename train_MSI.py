@@ -3,8 +3,7 @@ from torchvision.datasets import CIFAR100
 from torchvision import transforms
 from torch.utils.data import Dataset
 import torch.multiprocessing as mp
-
-
+from torch.distributions.studentT import StudentT
 import torch.distributed as dist
 import os, torch, torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
