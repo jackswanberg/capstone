@@ -259,14 +259,13 @@ def main(rank, world_size):
             label = batch[1].to(ddpm.device)
             t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
             loss = ddpm.p_losses(x, label, t)
-
-            # Forward pass and loss
-            out = model(x_noisy, t, y)
-            loss = ((out - noise)**2).mean()  # or your NLL
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+        if epoch%10==0 and rank==0:
+            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}.pth"
+            torch.save(model.state_dict(),model_save_file)
+        print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
     dist.destroy_process_group()
 
