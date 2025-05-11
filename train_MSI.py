@@ -308,11 +308,13 @@ def main(rank, world_size):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        if epoch%10==0 and rank==0:
-            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}.pth"
+        if epoch%50==0 and rank==0:
+            model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
+    model_save_file = f"model_saves/ddpm__conditional_epoch_final.pth"
+    torch.save(model.state_dict(),model_save_file)
     dist.destroy_process_group()
 
 if __name__ == "__main__":
