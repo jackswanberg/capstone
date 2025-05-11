@@ -254,7 +254,7 @@ def main(rank, world_size):
 
     for epoch in range(200):
         sampler.set_epoch(epoch)
-        for x, y in dataloader:
+        for batch in dataloader:
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
             t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
