@@ -218,6 +218,52 @@ class StudentTDDPM:
             x = self.p_sample(x, label, t_batch)
         return x.clamp(-1, 1)
 
+# ================================
+#     Gaussian Based DDPM
+# ================================
+class DDPM:
+    def __init__(self, model, betas):
+        self.model = model
+        self.device = next(model.parameters()).device
+
+        self.timesteps = len(betas)
+        self.betas = betas.to(self.device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+
+    def q_sample(self, x_start, t):
+        alpha_bar = extract(self.alpha_bars, t, x_start.shape)
+        noise = torch.randn_like(x_start).to(self.device)
+        x_noisy = torch.sqrt(alpha_bar) * x_start + torch.sqrt(1 - alpha_bar) * noise
+        return x_noisy, noise  # Return both!
+
+    def p_losses(self, x_start, label, t):
+        x_noisy, noise = self.q_sample(x_start, t)
+        predicted = self.model(x_noisy, label, t)
+        return torch.nn.functional.mse_loss(predicted, noise)
+
+
+    def p_sample(self, x, label, t):
+        betas_t = extract(self.betas, t, x.shape)
+        alphas_t = extract(self.alphas,t,x.shape)
+        alpha_bar_t = extract(self.alpha_bars, t, x.shape)
+        predicted_noise = self.model(x, label, t)
+
+        mean = (1 / torch.sqrt(alphas_t)) * (
+                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
+
+        if t[0] == 0:
+            return mean
+        noise = torch.randn_like(x).to(self.device)
+        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
+
+    def sample(self, label, shape):
+        x = torch.randn(shape).to(self.device)
+        for t in reversed(range(self.timesteps)):
+            t_batch = torch.tensor([t] * shape[0]).to(self.device)
+            x = self.p_sample(x, label, t_batch)
+        return x.clamp(-1, 1)
+
 
 def main(rank, world_size):
 
@@ -250,7 +296,7 @@ def main(rank, world_size):
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
     betas = linear_beta_schedule(timesteps=400)
 
-    ddpm = StudentTDDPM(model,betas)  # Your custom scheduler
+    ddpm = DDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(num_epochs):
         sampler.set_epoch(epoch)
