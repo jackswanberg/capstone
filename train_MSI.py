@@ -288,7 +288,7 @@ def main(rank, world_size):
     dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
 
     # === Model ===
-    model = UNet2(in_channels=3, base_channels=128,num_classes=num_classes)
+    model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
     model = model.to(rank)
     model = DDP(model, device_ids=[rank])
 
