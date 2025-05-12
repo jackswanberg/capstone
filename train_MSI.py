@@ -276,9 +276,8 @@ def main(rank, world_size):
 
     # === Dataset ===
     transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276))
+        transforms.Normalize((0.5,), (0.5,))
     ])
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
     num_classes = dataset.num_classes
@@ -287,7 +286,7 @@ def main(rank, world_size):
     dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
 
     # === Model ===
-    model = UNet(in_channels=3, base_channels=128,num_classes=num_classes)
+    model = UNet2(in_channels=3, base_channels=128,num_classes=num_classes)
     model = model.to(rank)
     model = DDP(model, device_ids=[rank])
 

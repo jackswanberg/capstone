@@ -4,12 +4,56 @@ import torch.nn.functional as F
 import torchvision
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+from torchvision.datasets import CIFAR100
 from torchvision import datasets, transforms
 from torch.distributions.studentT import StudentT
 import argparse
 import numpy as np
 import os
+
+from models import UNet2
+
+class CIFAR100LongTail(Dataset):
+    def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
+        self.root = root
+        self.phase = phase
+        self.transform = transform
+        self.num_classes = 100
+        self.imgs, self.labels = self._make_longtail(imbalance_factor)
+
+    def _make_longtail(self, imbalance_factor):
+        cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=True)
+        data, targets = cifar.data, np.array(cifar.targets)
+        cls_num = self.num_classes
+
+        # Long tail class distribution
+        cls_counts = []
+        img_per_cls_max = len(targets) // cls_num
+        for cls_idx in range(cls_num):
+            num = img_per_cls_max * (imbalance_factor ** (cls_idx / (cls_num - 1)))
+            cls_counts.append(int(num))
+
+        new_data, new_targets = [], []
+        for cls_idx, cls_count in enumerate(cls_counts):
+            idx = np.where(targets == cls_idx)[0]
+            np.random.shuffle(idx)
+            sel = idx[:cls_count]
+            new_data.append(data[sel])
+            new_targets.extend([cls_idx] * cls_count)
+
+        new_data = np.concatenate(new_data)
+        return new_data, new_targets
+
+    def __getitem__(self, index):
+        img, target = self.imgs[index], self.labels[index]
+        img = transforms.ToPILImage()(img)
+        if self.transform:
+            img = self.transform(img)
+        return img, target
+
+    def __len__(self):
+        return len(self.labels)
 
 # ================================
 #         CIFAR10 Dataset
@@ -256,6 +300,8 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
             t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
+            assert label.dtype == torch.long, f"Bad label dtype: {label.dtype}"
+            assert (label >= 0).all() and (label < 100).all(), f"Label out of range: {label}"
             loss = ddpm.p_losses(x, label, t)
             optimizer.zero_grad()
             loss.backward()
@@ -267,25 +313,28 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+    # device = torch.device("cpu")
     print(f"Device: {device}")
     timesteps = 400
     batch_size = 64
     num_workers = 2
 
+     # === Dataset ===
     transform = transforms.Compose([
-    transforms.ToTensor(),
-    ToMinusOneToOne()  # Normalize to [-1, 1]
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
     ])
+    dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
+    num_classes = dataset.num_classes
+    print(num_classes)
 
-    train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    num_classes = len(train_data.classes)
-    train_loader = DataLoader(train_data, 
-                              batch_size=batch_size, 
-                              shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=64)
 
     betas = linear_beta_schedule(timesteps)
-    model = UNet(in_channels=3,base_channels=128,num_classes=num_classes).to(device)
+    model = UNet2(num_classes=num_classes,base_channels=128).to(device)
     ddpm = StudentTDDPM(model, betas, nu=4.0)
+
+    print(f"Model class embedding shape: {model.class_emb.weight.shape}")
 
     #######################################################################################
     ############## EXAMPLE FOR NOISING PROCESS ############################################
@@ -308,7 +357,7 @@ def main():
     #######################################################################################
     ############## TRAINING ###############################################################
     #######################################################################################
-    model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth",map_location=device))
+    # model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth",map_location=device))
     train_ddpm(model, ddpm, train_loader, epochs=500)
     torch.save(model.state_dict(),"model_saves/student_t_UNET_conditional.pth")
 

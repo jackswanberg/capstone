@@ -10,10 +10,10 @@ class SinusoidalPosEmb(nn.Module):
 
     def forward(self, x):
         half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=x.device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        return torch.cat((emb.sin(), emb.cos()), dim=-1)
+        emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb).to(x.device)
+        emb = x[:, None].float() * emb[None, :]
+        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_emb_dim, class_emb_dim=None):
@@ -22,6 +22,9 @@ class ResidualBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(time_emb_dim, out_channels)
         )
+        if class_emb_dim==None:
+            class_emb_dim=time_emb_dim
+
         self.class_emb_proj = nn.Identity() if class_emb_dim is None else nn.Sequential(
             nn.SiLU(),
             nn.Linear(class_emb_dim, out_channels)
@@ -42,7 +45,9 @@ class ResidualBlock(nn.Module):
     def forward(self, x, t_emb, c_emb=None):
         h = self.block1(x)
         t = self.time_emb_proj(t_emb).unsqueeze(-1).unsqueeze(-1)
+        t = t.repeat(1, 1, h.shape[2], h.shape[3])  # Repeat along spatial dimensions
         c = 0 if c_emb is None else self.class_emb_proj(c_emb).unsqueeze(-1).unsqueeze(-1)
+        c = c.repeat(1, 1, h.shape[2], h.shape[3])  # Repeat across spatial dimensions
         h = h + t + c
         h = self.block2(h)
         return h + self.residual_conv(x)
@@ -84,6 +89,18 @@ class Upsample(nn.Module):
     def forward(self, x):
         x = F.interpolate(x, scale_factor=2, mode='nearest')
         return self.conv(x)
+    
+class MiddleBlock(nn.Module):
+    def __init__(self, channels, time_emb_dim):
+        super().__init__()
+        self.res_block = ResidualBlock(channels, channels, time_emb_dim, class_emb_dim=time_emb_dim)
+        self.attn = AttentionBlock(channels)
+
+    def forward(self, x, t_emb, c_emb):
+        x = self.res_block(x, t_emb, c_emb)
+        x = self.attn(x)
+        return x
+
 
 class UNet2(nn.Module):
     def __init__(self, num_classes=100, base_channels=128, time_emb_dim=256):
@@ -105,11 +122,13 @@ class UNet2(nn.Module):
         self.pool2 = Downsample(base_channels * 2)
 
         # Bottleneck
-        self.middle = nn.Sequential(
-            ResidualBlock(base_channels * 4, base_channels * 4, time_emb_dim),
-            AttentionBlock(base_channels * 4),
-            ResidualBlock(base_channels * 4, base_channels * 4, time_emb_dim),
-        )
+        self.middle = MiddleBlock(base_channels * 4, time_emb_dim)
+
+        # self.middle = nn.Sequential(
+        #     ResidualBlock(base_channels * 4, base_channels * 4, time_emb_dim),
+        #     AttentionBlock(base_channels * 4),
+        #     ResidualBlock(base_channels * 4, base_channels * 4, time_emb_dim),
+        # )
 
         # Upsampling path
         self.up3 = ResidualBlock(base_channels * 4 + base_channels * 2, base_channels * 2, time_emb_dim)
@@ -123,7 +142,7 @@ class UNet2(nn.Module):
             nn.Conv2d(base_channels, 3, kernel_size=1)
         )
 
-    def forward(self, x, t, y):
+    def forward(self, x, y, t):
         t_emb = self.time_mlp(t)
         y_emb = self.class_emb(y)
 
