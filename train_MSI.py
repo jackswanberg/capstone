@@ -13,6 +13,8 @@ import numpy as np
 import os
 import pickle
 
+from models import UNet2
+
 class CIFAR100LongTail(Dataset):
     def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
         self.root = root
