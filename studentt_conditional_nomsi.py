@@ -11,11 +11,6 @@ import argparse
 import numpy as np
 import os
 
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.multiprocessing as mp
-
-
 # ================================
 #         CIFAR10 Dataset
 # ================================
@@ -95,7 +90,7 @@ class ResidualBlock(nn.Module):
         return h + self.residual_conv(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, base_channels=64, time_emb_dim=256):
+    def __init__(self, in_channels=3, base_channels=64, time_emb_dim=256, num_classes = 10):
         super().__init__()
         self.time_embedding = nn.Sequential(
             SinusoidalPositionEmbeddings(time_emb_dim),
@@ -257,7 +252,7 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     model.train()
     for epoch in tqdm(range(epochs)):
-        for batch in dataloader:
+        for batch in tqdm(iter(dataloader)):
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
             t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
@@ -270,58 +265,72 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
-def setup_ddp(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-
-    # initialize the process group
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
-
-def cleanup_ddp():
-    dist.destroy_process_group()
-
 def main():
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+    print(f"Device: {device}")
+    timesteps = 400
+    batch_size = 64
+    num_workers = 2
 
-    print("Entering main")
-    setup_ddp(rank, world_size)
-    print("Setup ddp")
-    # Device
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
-    print(f"Using device: {device}")
-
-    # Model + DDP
-    model = UNet(in_channels=3, base_channels=128).to(device)
-    model = DDP(model, device_ids=[rank])
-    print(f"Setup model")
-    
-    betas = linear_beta_schedule(timesteps=400)
-    ddpm = StudentTDDPM(model, betas, nu=4.0)
-
-    # Dataset + Sampler
     transform = transforms.Compose([
-        transforms.ToTensor(),
-        ToMinusOneToOne()
+    transforms.ToTensor(),
+    ToMinusOneToOne()  # Normalize to [-1, 1]
     ])
 
-    dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4, pin_memory=True)
-    print("Setup dataloader")
-    # Train
-    train_ddpm(model, ddpm, train_loader, epochs=300)
+    train_data = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    num_classes = len(train_data.classes)
+    train_loader = DataLoader(train_data, 
+                              batch_size=batch_size, 
+                              shuffle=True)
 
-    # Save only from rank 0
-    if rank == 0:
-        torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
+    betas = linear_beta_schedule(timesteps)
+    model = UNet(in_channels=3,base_channels=128,num_classes=num_classes).to(device)
+    ddpm = StudentTDDPM(model, betas, nu=4.0)
 
-    cleanup_ddp()
+    #######################################################################################
+    ############## EXAMPLE FOR NOISING PROCESS ############################################
+    #######################################################################################
+    # example = train_loader.dataset[0][0].to(device).unsqueeze(dim=0)
+    # print(example)
+    # steps = torch.Tensor([0,4,8,12,16,20]).to(device)
+    # for t in torch.arange(0,40,8):
+    #     t = t.to(device).unsqueeze(dim=0)
+    #     print(t.shape)
+    #     # t = torch.randint(0, ddpm.timesteps, (example.size(0),), device=ddpm.device)
+    #     print(t.shape)
+    #     noisy_sample = ddpm.q_sample(example,t).cpu()
+    #     noisy_sample = torch.clamp((noisy_sample + 1) / 2, 0, 1)
+    #     print(f"Timestep: {t}")
+    #     plt.figure()
+    #     plt.imshow(noisy_sample[0].permute(1,2,0))
+    #     plt.show()
+
+    #######################################################################################
+    ############## TRAINING ###############################################################
+    #######################################################################################
+    model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth",map_location=device))
+    train_ddpm(model, ddpm, train_loader, epochs=500)
+    torch.save(model.state_dict(),"model_saves/student_t_UNET_conditional.pth")
+
+    model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
+
+    class_label = 1
+    visualize_denoising(ddpm, class_label)
+    visualize_one_sample_per_class(ddpm)
+    # sample_labels = torch.full((16,), 0, dtype=torch.long).to(device)
+    sample_labels = torch.randint(0,10,(16,1)).to(device).squeeze()
+    print(sample_labels.shape)
+    samples = ddpm.sample(sample_labels,(16, 3, 32, 32)).cpu()
+    grid = torch.clamp((samples + 1) / 2, 0, 1)  # Convert back to [0, 1]
+    grid = torchvision.utils.make_grid(grid, nrow=4)
+    plt.imshow(grid.permute(1, 2, 0))
+    plt.axis("off")
+    plt.show()
+
+
 
 # ================================
 #         Run Training
 # ================================
-if __name__ == "__main__":
-    world_size = torch.cuda.device_count()
-    mp.spawn(main, args=(world_size,), nprocs=world_size)
+if __name__=="__main__":
+    main()

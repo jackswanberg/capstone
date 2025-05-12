@@ -1,20 +1,58 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision.datasets import CIFAR100
+from torchvision import transforms
+from torch.utils.data import Dataset
+import torch.multiprocessing as mp
 from torch.distributions.studentT import StudentT
-import argparse
+import torch.distributed as dist
+import os, torch, torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from torchvision import transforms
 import numpy as np
 import os
+import pickle
 
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.multiprocessing as mp
+class CIFAR100LongTail(Dataset):
+    def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
+        self.root = root
+        self.phase = phase
+        self.transform = transform
+        self.num_classes = 100
+        self.imgs, self.labels = self._make_longtail(imbalance_factor)
 
+    def _make_longtail(self, imbalance_factor):
+        cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=True)
+        data, targets = cifar.data, np.array(cifar.targets)
+        cls_num = self.num_classes
+
+        # Long tail class distribution
+        cls_counts = []
+        img_per_cls_max = len(targets) // cls_num
+        for cls_idx in range(cls_num):
+            num = img_per_cls_max * (imbalance_factor ** (cls_idx / (cls_num - 1)))
+            cls_counts.append(int(num))
+
+        new_data, new_targets = [], []
+        for cls_idx, cls_count in enumerate(cls_counts):
+            idx = np.where(targets == cls_idx)[0]
+            np.random.shuffle(idx)
+            sel = idx[:cls_count]
+            new_data.append(data[sel])
+            new_targets.extend([cls_idx] * cls_count)
+
+        new_data = np.concatenate(new_data)
+        return new_data, new_targets
+
+    def __getitem__(self, index):
+        img, target = self.imgs[index], self.labels[index]
+        img = transforms.ToPILImage()(img)
+        if self.transform:
+            img = self.transform(img)
+        return img, target
+
+    def __len__(self):
+        return len(self.labels)
 
 # ================================
 #         CIFAR10 Dataset
@@ -28,28 +66,6 @@ class ToMinusOneToOne:
 # ================================
 def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
     return torch.linspace(beta_start, beta_end, timesteps)
-
-# ================================
-#     Basic UNet-like Model
-# ================================
-class ConvNet(nn.Module):
-    def __init__(self, channels=3):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels + 1, 64, 3, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
-        self.conv3 = nn.Conv2d(128, 64, 3, padding=1)
-        self.conv4 = nn.Conv2d(64, channels, 3, padding=1)
-
-    def forward(self, x, t):
-        # Broadcast time embedding
-        t_embed = t[:, None, None, None].float() / 1000
-        t_embed = t_embed.expand(-1, 1, x.shape[2], x.shape[3])
-        x = torch.cat([x, t_embed], dim=1)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        return self.conv4(x)
-
 
 # ================================
 #     Beefier UNet-like Model
@@ -95,7 +111,7 @@ class ResidualBlock(nn.Module):
         return h + self.residual_conv(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, base_channels=64, time_emb_dim=256):
+    def __init__(self, in_channels=3, base_channels=64, num_classes = 100, time_emb_dim=256):
         super().__init__()
         self.time_embedding = nn.Sequential(
             SinusoidalPositionEmbeddings(time_emb_dim),
@@ -155,53 +171,6 @@ def student_t_nll(x, mu, nu=4.0):
     return torch.log(1 + ((x - mu) ** 2) / nu).mean()
 
 # ================================
-#      Visualization Functions
-# ================================
-def visualize_denoising(ddpm, label, steps_to_show=[0, 25, 50, 75, 99]):
-    x = torch.randn((10, 3, 32, 32)).to(ddpm.device)
-    label = torch.tensor([label], device=ddpm.device)
-    # label = torch.arange(0,10,device=ddpm.device,dtype=torch.long)
-    images = []
-
-    for t in reversed(range(ddpm.timesteps)):
-        t_batch = torch.tensor([t]).to(ddpm.device)
-        x = ddpm.p_sample(x, label, t_batch)
-        if t in steps_to_show:
-            img = torch.clamp((x[0] + 1) / 2, 0, 1).cpu()
-            images.append(img)
-
-    grid = torch.stack(images)
-    grid = torchvision.utils.make_grid(grid, nrow=len(images))
-    plt.imshow(grid.permute(1, 2, 0))
-    plt.title("Denoising Progression")
-    plt.axis("off")
-    plt.show()
-
-def visualize_one_sample_per_class(ddpm):
-    ddpm.model.eval()
-    with torch.no_grad():
-        class_labels = torch.arange(10).to(ddpm.device)
-        samples = ddpm.sample(class_labels, (10, 3, 32, 32)).cpu()
-        samples = (samples + 1) / 2  # De-normalize to [0, 1]
-
-        class_names = [
-            "airplane", "automobile", "bird", "cat", "deer",
-            "dog", "frog", "horse", "ship", "truck"
-        ]
-
-        fig, axes = plt.subplots(1, 10, figsize=(15, 2))
-        for i, ax in enumerate(axes):
-            img = samples[i]
-            ax.imshow(img.permute(1, 2, 0))
-            ax.axis("off")
-            ax.set_title(class_names[i], fontsize=8)
-        plt.tight_layout()
-        plt.show()
-
-# Call the function
-
-
-# ================================
 #     Student-t Based DDPM
 # ================================
 class StudentTDDPM:
@@ -250,13 +219,87 @@ class StudentTDDPM:
         return x.clamp(-1, 1)
 
 # ================================
-#        Training Loop
+#     Gaussian Based DDPM
 # ================================
-def train_ddpm(model, ddpm, dataloader, epochs=50):
-    print("Entered training")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    model.train()
-    for epoch in tqdm(range(epochs)):
+class DDPM:
+    def __init__(self, model, betas):
+        self.model = model
+        self.device = next(model.parameters()).device
+
+        self.timesteps = len(betas)
+        self.betas = betas.to(self.device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+
+    def q_sample(self, x_start, t):
+        alpha_bar = extract(self.alpha_bars, t, x_start.shape)
+        noise = torch.randn_like(x_start).to(self.device)
+        x_noisy = torch.sqrt(alpha_bar) * x_start + torch.sqrt(1 - alpha_bar) * noise
+        return x_noisy, noise  # Return both!
+
+    def p_losses(self, x_start, label, t):
+        x_noisy, noise = self.q_sample(x_start, t)
+        predicted = self.model(x_noisy, label, t)
+        return torch.nn.functional.mse_loss(predicted, noise)
+
+
+    def p_sample(self, x, label, t):
+        betas_t = extract(self.betas, t, x.shape)
+        alphas_t = extract(self.alphas,t,x.shape)
+        alpha_bar_t = extract(self.alpha_bars, t, x.shape)
+        predicted_noise = self.model(x, label, t)
+
+        mean = (1 / torch.sqrt(alphas_t)) * (
+                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
+
+        if t[0] == 0:
+            return mean
+        noise = torch.randn_like(x).to(self.device)
+        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
+
+    def sample(self, label, shape):
+        x = torch.randn(shape).to(self.device)
+        for t in reversed(range(self.timesteps)):
+            t_batch = torch.tensor([t] * shape[0]).to(self.device)
+            x = self.p_sample(x, label, t_batch)
+        return x.clamp(-1, 1)
+
+
+def main(rank, world_size):
+
+
+    # === DDP Init ===
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+    # === Dataset ===
+    transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276))
+    ])
+    dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
+    num_classes = dataset.num_classes
+
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
+
+    # === Model ===
+    model = UNet(in_channels=3, base_channels=128,num_classes=num_classes)
+    model = model.to(rank)
+    model = DDP(model, device_ids=[rank])
+
+    # === Training ===
+    num_epochs = 500
+    optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    betas = linear_beta_schedule(timesteps=400)
+
+    ddpm = DDPM(model,betas)  # Your custom scheduler
+
+    for epoch in range(num_epochs):
+        sampler.set_epoch(epoch)
         for batch in dataloader:
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
@@ -265,63 +308,15 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        if epoch%10==0:
-            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}.pth"
+        if epoch%50==0 and rank==0:
+            model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
 
-def setup_ddp(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-
-    # initialize the process group
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
-
-def cleanup_ddp():
+    model_save_file = f"model_saves/ddpm__conditional_epoch_final.pth"
+    torch.save(model.state_dict(),model_save_file)
     dist.destroy_process_group()
 
-def main():
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-
-    print("Entering main")
-    setup_ddp(rank, world_size)
-    print("Setup ddp")
-    # Device
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
-    print(f"Using device: {device}")
-
-    # Model + DDP
-    model = UNet(in_channels=3, base_channels=128).to(device)
-    model = DDP(model, device_ids=[rank])
-    print(f"Setup model")
-    
-    betas = linear_beta_schedule(timesteps=400)
-    ddpm = StudentTDDPM(model, betas, nu=4.0)
-
-    # Dataset + Sampler
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        ToMinusOneToOne()
-    ])
-
-    dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4, pin_memory=True)
-    print("Setup dataloader")
-    # Train
-    train_ddpm(model, ddpm, train_loader, epochs=300)
-
-    # Save only from rank 0
-    if rank == 0:
-        torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
-
-    cleanup_ddp()
-
-# ================================
-#         Run Training
-# ================================
 if __name__ == "__main__":
     world_size = torch.cuda.device_count()
     mp.spawn(main, args=(world_size,), nprocs=world_size)

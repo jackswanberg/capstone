@@ -1,19 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-from torch.distributions.studentT import StudentT
-import argparse
-import numpy as np
-import os
-
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.multiprocessing as mp
 
 
 # ================================
@@ -248,80 +235,3 @@ class StudentTDDPM:
             t_batch = torch.tensor([t] * shape[0]).to(self.device)
             x = self.p_sample(x, label, t_batch)
         return x.clamp(-1, 1)
-
-# ================================
-#        Training Loop
-# ================================
-def train_ddpm(model, ddpm, dataloader, epochs=50):
-    print("Entered training")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    model.train()
-    for epoch in tqdm(range(epochs)):
-        for batch in dataloader:
-            x = batch[0].to(ddpm.device)
-            label = batch[1].to(ddpm.device)
-            t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
-            loss = ddpm.p_losses(x, label, t)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        if epoch%10==0:
-            model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}.pth"
-            torch.save(model.state_dict(),model_save_file)
-        print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
-
-def setup_ddp(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-
-    # initialize the process group
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
-
-def cleanup_ddp():
-    dist.destroy_process_group()
-
-def main():
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-
-    print("Entering main")
-    setup_ddp(rank, world_size)
-    print("Setup ddp")
-    # Device
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
-    print(f"Using device: {device}")
-
-    # Model + DDP
-    model = UNet(in_channels=3, base_channels=128).to(device)
-    model = DDP(model, device_ids=[rank])
-    print(f"Setup model")
-    
-    betas = linear_beta_schedule(timesteps=400)
-    ddpm = StudentTDDPM(model, betas, nu=4.0)
-
-    # Dataset + Sampler
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        ToMinusOneToOne()
-    ])
-
-    dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4, pin_memory=True)
-    print("Setup dataloader")
-    # Train
-    train_ddpm(model, ddpm, train_loader, epochs=300)
-
-    # Save only from rank 0
-    if rank == 0:
-        torch.save(model.module.state_dict(), "model_saves/student_t_ddpm_ddp.pth")
-
-    cleanup_ddp()
-
-# ================================
-#         Run Training
-# ================================
-if __name__ == "__main__":
-    world_size = torch.cuda.device_count()
-    mp.spawn(main, args=(world_size,), nprocs=world_size)
