@@ -294,7 +294,11 @@ def main(rank, world_size):
 
     # === Training ===
     num_epochs = 500
-    optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                               mode='min',
+                                               factor=0.3,
+                                               patience=10)
     betas = linear_beta_schedule(timesteps=400)
 
     ddpm = DDPM(model,betas)  # Your custom scheduler
