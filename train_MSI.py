@@ -15,7 +15,7 @@ import pickle
 from diffusers import UNet2DConditionModel
 
 from models import UNet2
-from GammaDDPM import GammaDDPM, FrechetDDPM
+from GammaDDPM import GammaDDPM, FrechetDDPM, StudentTDDPM, DDPM
 
 class CIFAR100LongTail(Dataset):
     def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
@@ -189,114 +189,6 @@ class UNet(nn.Module):
 
         return x
 
-# ================================
-#      Helper Function
-# ================================
-def extract(a, t, x_shape):
-    return a.gather(-1, t.to(torch.int64)).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
-
-def student_t_nll(x, mu, nu=4.0):
-    return torch.log(1 + ((x - mu) ** 2) / nu).mean()
-
-# ================================
-#     Student-t Based DDPM
-# ================================
-class StudentTDDPM:
-    def __init__(self, model, betas, nu=4.0):
-        self.model = model
-        self.nu = nu
-        self.device = next(model.parameters()).device
-
-        self.timesteps = len(betas)
-        self.betas = betas.to(self.device)
-        self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-
-    def q_sample(self, x_start, t):
-        alpha_bar = extract(self.alpha_bars, t, x_start.shape)
-        noise = StudentT(df=self.nu, loc=0, scale=1).sample(x_start.shape).to(self.device)
-        x_noisy = torch.sqrt(alpha_bar) * x_start + torch.sqrt(1 - alpha_bar) * noise
-        return x_noisy, noise  # Return both!
-
-    def p_losses(self, x_start, label, t):
-        x_noisy, noise = self.q_sample(x_start, t)
-        predicted = self.model(x_noisy, label, t)
-        return student_t_nll(noise, predicted, self.nu)
-
-
-    def p_sample(self, x, label, t):
-        betas_t = extract(self.betas, t, x.shape)
-        alphas_t = extract(self.alphas,t,x.shape)
-        alpha_bar_t = extract(self.alpha_bars, t, x.shape)
-        predicted_noise = self.model(x, label, t)
-
-        mean = (1 / torch.sqrt(alphas_t)) * (
-                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
-
-        if t[0] == 0:
-            return mean
-        noise = StudentT(df=self.nu, loc=0, scale=1).sample(x.shape).to(self.device)
-
-        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
-
-    def sample(self, label, shape):
-        x = torch.randn(shape).to(self.device)
-        for t in reversed(range(self.timesteps)):
-            t_batch = torch.tensor([t] * shape[0]).to(self.device)
-            x = self.p_sample(x, label, t_batch)
-        return x.clamp(-1, 1)
-
-# ================================
-#     Gaussian Based DDPM
-# ================================
-class DDPM:
-    def __init__(self, model, betas):
-        self.model = model
-        self.device = next(model.parameters()).device
-
-        self.timesteps = len(betas)
-        self.betas = betas.to(self.device)
-        self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-
-    def q_sample(self, x_start, t):
-        alpha_bar = extract(self.alpha_bars, t, x_start.shape)
-        noise = torch.randn_like(x_start).to(self.device)
-        x_noisy = torch.sqrt(alpha_bar) * x_start + torch.sqrt(1 - alpha_bar) * noise
-        return x_noisy, noise  # Return both!
-
-    def p_losses(self, x_start, label, t):
-        x_noisy, noise = self.q_sample(x_start, t)
-        encoder_hidden_states = torch.zeros((x_start.shape[0], 1, 1280), device=self.device)
-        predicted = self.model(x_noisy, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)  # <- fixed
-        predicted = predicted.sample
-        loss = nn.functional.mse_loss(predicted, noise)
-        return loss
-
-
-    def p_sample(self, x, label, t):
-        betas_t = extract(self.betas, t, x.shape)
-        alphas_t = extract(self.alphas,t,x.shape)
-        alpha_bar_t = extract(self.alpha_bars, t, x.shape)
-        encoder_hidden_states = torch.zeros((x.shape[0], 1, 1280), device=self.device)
-        predicted_noise = self.model(x, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)
-        predicted_noise = predicted_noise.sample
-        mean = (1 / torch.sqrt(alphas_t)) * (
-                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
-
-        if t[0] == 0:
-            return mean
-        noise = torch.randn_like(x).to(self.device)
-        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
-
-    def sample(self, label, shape):
-        x = torch.randn(shape).to(self.device)
-        for t in reversed(range(self.timesteps)):
-            t_batch = torch.tensor([t] * shape[0]).to(self.device)
-            x = self.p_sample(x, label, t_batch)
-        return x.clamp(-1, 1)
-
-
 
 def main(rank, world_size):
 
@@ -368,7 +260,7 @@ def main(rank, world_size):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                mode='min',
-                                               factor=0.3,
+                                               factor=0.1,
                                                patience=10)
     early_stopper = EarlyStopping(patience=20, min_delta=1e-4)
 
@@ -401,8 +293,8 @@ def main(rank, world_size):
             loss = ddpm.p_losses(x, label, t)
 
             val_loss += loss.item()
-
-        early_stopper(val_loss)
+        if rank == 0:
+            early_stopper(val_loss)
         if early_stopper.early_stop:
             print(f"Early stopping triggered at epoch {epoch}. Best val loss: {early_stopper.best_loss:.4f}")
             break
