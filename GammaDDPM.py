@@ -11,6 +11,8 @@ from torch.distributions.studentT import StudentT
 from torch.distributions.gamma import Gamma
 import numpy as np
 
+from models import UNet2
+
 # ================================
 #         CIFAR10 Dataset
 # ================================
@@ -215,8 +217,22 @@ def sample_gamma_noise(shape, alpha=2.0, beta=1.0, device='cpu'):
     noise = noise - noise.mean(dim=(1,2,3), keepdim=True)
     return noise
 
+def sample_frechet_noise(shape, alpha=2.0, scale=1.0, loc=0.0, device='cpu'):
+    # Uniform samples
+    u = torch.rand(shape, device=device)
+    noise = loc + scale * (-torch.log(u)) ** (-1.0 / alpha)
+    noise = noise - noise.mean(dim=(1,2,3), keepdim=True)
+    return noise
+
 def gamma_nll(x, alpha=2.0, beta=1.0):
     return -Gamma(alpha, beta).log_prob(x).mean()
+
+def frechet_nll(x, alpha=2.0, scale=1.0, loc=0.0):
+    eps = 1e-6
+    z = (x - loc) / scale
+    z = torch.clamp(z, min=eps)
+    log_prob = torch.log(alpha / scale) - (1 + alpha) * torch.log(z) - z.pow(-alpha)
+    return -log_prob.mean()
 
 class GammaDDPM:
     def __init__(self, model, betas, gamma_alpha=2.0, gamma_beta=1.0):
@@ -239,9 +255,11 @@ class GammaDDPM:
     def p_losses(self, x_start, label, t):
         x_noisy, noise = self.q_sample(x_start, t)
         predicted = self.model(x_noisy, label, t)
-        noise = torch.clamp(noise, min=1e-5)
-        predicted = torch.clamp(predicted, min=1e-5)
-        return gamma_nll(torch.clamp(noise - predicted,min=1e-5), self.gamma_alpha,self.gamma_beta)
+        # noise = torch.clamp(noise, min=1e-5)
+        # predicted = torch.clamp(predicted, min=1e-5)
+        loss = nn.functional.smooth_l1_loss(predicted,noise)
+        return loss
+        # return gamma_nll(torch.clamp(noise - predicted,min=1e-5), self.gamma_alpha,self.gamma_beta)
 
 
     def p_sample(self, x, label, t):
@@ -266,6 +284,56 @@ class GammaDDPM:
             x = self.p_sample(x, t_batch)
         return x.clamp(-1, 1)
     
+class FrechetDDPM:
+    def __init__(self, model, betas, f_alpha=2.0, scale=1.0):
+        self.model = model
+        self.f_alpha = f_alpha
+        self.scale = scale
+        self.device = next(model.parameters()).device
+
+        self.timesteps = len(betas)
+        self.betas = betas.to(self.device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+
+    def q_sample(self, x_start, t):
+        alpha_bar = extract(self.alpha_bars, t, x_start.shape)
+        noise = sample_frechet_noise(x_start.shape, alpha=self.f_alpha, scale=self.scale, device=self.device)
+        x_noisy = torch.sqrt(alpha_bar) * x_start + torch.sqrt(1 - alpha_bar) * noise
+        return x_noisy, noise  # Return both!
+
+    def p_losses(self, x_start, label, t):
+        x_noisy, noise = self.q_sample(x_start, t)
+        predicted = self.model(x_noisy, label, t)
+        # noise = torch.clamp(noise, min=1e-5)
+        # predicted = torch.clamp(predicted, min=1e-5)
+        loss = nn.functional.smooth_l1_loss(predicted,noise)
+        return loss
+        # return gamma_nll(torch.clamp(noise - predicted,min=1e-5), self.gamma_alpha,self.gamma_beta)
+
+
+    def p_sample(self, x, label, t):
+        betas_t = extract(self.betas, t, x.shape)
+        alphas_t = extract(self.alphas,t,x.shape)
+        alpha_bar_t = extract(self.alpha_bars, t, x.shape)
+        predicted_noise = self.model(x, label, t)
+
+        mean = (1 / torch.sqrt(alphas_t)) * (
+                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
+ 
+        if t[0] == 0:
+            return mean
+        noise = sample_frechet_noise(x.shape, alpha=self.f_alpha, scale=self.scale, device=self.device)
+
+        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
+
+    def sample(self, shape):
+        x = torch.randn(shape).to(self.device)
+        for t in reversed(range(self.timesteps)):
+            t_batch = torch.tensor([t] * shape[0]).to(self.device)
+            x = self.p_sample(x, t_batch)
+        return x.clamp(-1, 1)
+
 # ================================
 #        Training Loop
 # ================================
@@ -290,8 +358,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timesteps = 400
     betas = linear_beta_schedule(timesteps)
-    model = UNet(in_channels=3,base_channels=128).to(device)
-    ddpm = GammaDDPM(model, betas, gamma_alpha=2.0, gamma_beta=1.0)
+    model = UNet2(base_channels=128).to(device)
+    ddpm = FrechetDDPM(model, betas, f_alpha=2.0, scale=1.0)
 
 
 
