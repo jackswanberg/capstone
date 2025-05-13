@@ -307,10 +307,12 @@ def main(rank, world_size):
     torch.cuda.set_device(rank)
 
     # === Dataset ===
+  # === Dataset ===
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
+
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
     val_dataset = CIFAR100LongTail(root='./data', phase='test', imbalance_factor=0.01, transform=transform)
     num_classes = dataset.num_classes
@@ -318,8 +320,23 @@ def main(rank, world_size):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
 
-    dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=2,pin_memory=True, persistent_workers=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=64, sampler=val_sampler, num_workers=2,pin_memory=True,persistent_workers=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=128,
+        sampler=sampler,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=128,
+        sampler=val_sampler,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True
+    )
 
     # === Model ===
     # model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
