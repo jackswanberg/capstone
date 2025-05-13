@@ -293,7 +293,7 @@ def main(rank, world_size):
     model = DDP(model, device_ids=[rank])
 
     # === Training ===
-    num_epochs = 500
+    num_epochs = 250
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                mode='min',
