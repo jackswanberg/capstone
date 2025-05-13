@@ -308,7 +308,9 @@ def main(rank, world_size):
     ddpm = DDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(num_epochs):
-        #Test
+        train_loss = 0
+        val_loss = 0
+        #Train
         sampler.set_epoch(epoch)
         model.train()
         for batch in dataloader:
@@ -320,6 +322,8 @@ def main(rank, world_size):
             loss.backward()
             optimizer.step()
 
+            train_loss += loss.item()
+
         #Validation
         val_sampler.set_epoch(epoch)
         model.val()
@@ -329,10 +333,14 @@ def main(rank, world_size):
             t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
             loss = ddpm.p_losses(x, label, t)
 
+            val_loss += loss.item()
+
         if epoch%50==0 and rank==0:
             model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
-        print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
+        print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f} / Val Loss = {val_loss:.4f}")
+        print(f"Current learning rate: {optimizer.param_groups['lr']}")
+        scheduler.step(val_loss)
 
     model_save_file = f"model_saves/ddpm__conditional_epoch_final.pth"
     torch.save(model.state_dict(),model_save_file)
