@@ -339,7 +339,7 @@ def main(rank, world_size):
             model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f} / Val Loss = {val_loss:.4f}")
-        print(f"Current learning rate: {optimizer.param_groups['lr']}")
+        print(f"Current learning rate: {scheduler.get_last_lr()}")
         scheduler.step(val_loss)
 
     model_save_file = f"model_saves/ddpm__conditional_epoch_final.pth"
