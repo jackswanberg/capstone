@@ -12,7 +12,11 @@ import argparse
 import numpy as np
 import os
 
+from GammaDDPM import GammaDDPM, FrechetDDPM
 from models import UNet2
+from DhariwalUNet import DhariwalUNet
+from diffusers import UNet2DConditionModel
+import diffusers
 
 class CIFAR100LongTail(Dataset):
     def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
@@ -237,7 +241,56 @@ def visualize_one_sample_per_class(ddpm):
         plt.tight_layout()
         plt.show()
 
-# Call the function
+
+# ================================
+#     Gaussian Based DDPM
+# ================================
+class DDPM:
+    def __init__(self, model, betas):
+        self.model = model
+        self.device = next(model.parameters()).device
+
+        self.timesteps = len(betas)
+        self.betas = betas.to(self.device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+
+    def q_sample(self, x_start, t):
+        alpha_bar = extract(self.alpha_bars, t, x_start.shape)
+        noise = torch.randn_like(x_start).to(self.device)
+        x_noisy = torch.sqrt(alpha_bar) * x_start + torch.sqrt(1 - alpha_bar) * noise
+        return x_noisy, noise  # Return both!
+
+    def p_losses(self, x_start, label, t):
+        x_noisy, noise = self.q_sample(x_start, t)
+        encoder_hidden_states = torch.zeros((x_start.shape[0], 1, 1280), device=self.device)
+        predicted = self.model(x_noisy, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)  # <- fixed
+        predicted = predicted.sample
+        loss = nn.functional.smooth_l1_loss(predicted, noise)
+        return loss
+
+
+    def p_sample(self, x, label, t):
+        betas_t = extract(self.betas, t, x.shape)
+        alphas_t = extract(self.alphas,t,x.shape)
+        alpha_bar_t = extract(self.alpha_bars, t, x.shape)
+        encoder_hidden_states = torch.zeros((x.shape[0], 1, 1280), device=self.device)
+        predicted_noise = self.model(x, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)
+        predicted_noise = predicted_noise.sample
+        mean = (1 / torch.sqrt(alphas_t)) * (
+                x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
+
+        if t[0] == 0:
+            return mean
+        noise = torch.randn_like(x).to(self.device)
+        return torch.sqrt(alphas_t) * mean + torch.sqrt(betas_t) * noise
+
+    def sample(self, label, shape):
+        x = torch.randn(shape).to(self.device)
+        for t in reversed(range(self.timesteps)):
+            t_batch = torch.tensor([t] * shape[0]).to(self.device)
+            x = self.p_sample(x, label, t_batch)
+        return x.clamp(-1, 1)
 
 
 # ================================
@@ -291,12 +344,21 @@ class StudentTDDPM:
 # ================================
 #        Training Loop
 # ================================
-def train_ddpm(model, ddpm, dataloader, epochs=50):
+def train_ddpm(model, ddpm, dataloader, val_dataloader, epochs=50):
     print("Entered training")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                               mode='min',
+                                               factor=0.3,
+                                               patience=10)
+    print(scheduler.get_last_lr())
     model.train()
+    epoch_loss = 0
     for epoch in tqdm(range(epochs)):
-        for batch in tqdm(iter(dataloader)):
+        train_loss = 0
+        val_loss = 0
+        model.train()
+        for batch in dataloader:
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
             t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
@@ -306,10 +368,23 @@ def train_ddpm(model, ddpm, dataloader, epochs=50):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            train_loss += loss.item()
+        
+        model.eval()
+        for batch in val_dataloader:
+            x = batch[0].to(ddpm.device)
+            label = batch[1].to(ddpm.device)
+            t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
+            assert label.dtype == torch.long, f"Bad label dtype: {label.dtype}"
+            assert (label >= 0).all() and (label < 100).all(), f"Label out of range: {label}"
+            loss = ddpm.p_losses(x, label, t)
+            val_loss += loss.item()
+
         if epoch%10==0:
             model_save_file = f"model_saves/studenttddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
-        print(f"Epoch {epoch+1}: Loss = {loss.item():.4f}")
+        print(f"Epoch {epoch+1}: Loss = {train_loss:.4f}")
+        print(f"Epoch {epoch+1}: Val Loss = {val_loss:.4f}")
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
@@ -321,47 +396,39 @@ def main():
 
      # === Dataset ===
     transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
+    val_dataset = CIFAR100LongTail(root='./data', phase = "Validation", imbalance_factor=0.01, transform=transform)
     num_classes = dataset.num_classes
-    print(num_classes)
 
-    train_loader = DataLoader(dataset, batch_size=64)
+
+    train_loader = DataLoader(dataset, batch_size=batch_size)
+    val_loader = DataLoader(val_dataset,batch_size=batch_size)
 
     betas = linear_beta_schedule(timesteps)
-    model = UNet2(num_classes=num_classes,base_channels=128).to(device)
-    ddpm = StudentTDDPM(model, betas, nu=4.0)
+    # model = UNet(num_classes=num_classes,base_channels=256).to(device)
+    model = UNet2DConditionModel(
+        sample_size=32,
+        in_channels=3,
+        out_channels=3,
+        layers_per_block=2,
+        block_out_channels=(128, 128, 256),
+        down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D"),
+        up_block_types=("AttnUpBlock2D", "UpBlock2D", "UpBlock2D"),
+        class_embed_type="timestep",  # Important for conditional generation
+        num_class_embeds=100,  # CIFAR-100
+    )
+    model.to(device)
+    ddpm = DDPM(model, betas)
 
-    print(f"Model class embedding shape: {model.class_emb.weight.shape}")
-
-    #######################################################################################
-    ############## EXAMPLE FOR NOISING PROCESS ############################################
-    #######################################################################################
-    # example = train_loader.dataset[0][0].to(device).unsqueeze(dim=0)
-    # print(example)
-    # steps = torch.Tensor([0,4,8,12,16,20]).to(device)
-    # for t in torch.arange(0,40,8):
-    #     t = t.to(device).unsqueeze(dim=0)
-    #     print(t.shape)
-    #     # t = torch.randint(0, ddpm.timesteps, (example.size(0),), device=ddpm.device)
-    #     print(t.shape)
-    #     noisy_sample = ddpm.q_sample(example,t).cpu()
-    #     noisy_sample = torch.clamp((noisy_sample + 1) / 2, 0, 1)
-    #     print(f"Timestep: {t}")
-    #     plt.figure()
-    #     plt.imshow(noisy_sample[0].permute(1,2,0))
-    #     plt.show()
-
-    #######################################################################################
-    ############## TRAINING ###############################################################
-    #######################################################################################
-    # model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth",map_location=device))
-    train_ddpm(model, ddpm, train_loader, epochs=500)
+    train_ddpm(model, ddpm, train_loader,val_loader, epochs=200)
     torch.save(model.state_dict(),"model_saves/student_t_UNET_conditional.pth")
 
-    model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
+    # model.load_state_dict(torch.load("model_saves/student_t_UNET_conditional.pth"))
 
     class_label = 1
     visualize_denoising(ddpm, class_label)

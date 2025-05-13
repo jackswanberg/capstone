@@ -10,9 +10,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 import pickle
 from diffusers import UNet2DConditionModel
+
 
 from models import UNet2
 from GammaDDPM import GammaDDPM, FrechetDDPM
@@ -24,10 +26,12 @@ class CIFAR100LongTail(Dataset):
         self.transform = transform
         self.num_classes = 100
         self.imgs, self.labels = self._make_longtail(imbalance_factor)
+        self.class_to_idx = {}
 
     def _make_longtail(self, imbalance_factor):
-        print("Making longtail dataset")
-        cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=False)
+        cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=True)
+        self.class_to_idx = cifar.class_to_idx
+        self.idx_to_class = {v: k for k,v in self.class_to_idx.items()}
         data, targets = cifar.data, np.array(cifar.targets)
         cls_num = self.num_classes
 
@@ -71,29 +75,6 @@ class ToMinusOneToOne:
 # ================================
 def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
     return torch.linspace(beta_start, beta_end, timesteps)
-
-class EarlyStopping:
-    def __init__(self, patience=10, min_delta=0.0):
-        """
-        Args:
-            patience (int): How many epochs to wait after last improvement.
-            min_delta (float): Minimum improvement to qualify as improvement.
-        """
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_loss = float('inf')
-        self.counter = 0
-        self.early_stop = False
-
-    def __call__(self, val_loss):
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.counter = 0
-        else:
-            self.counter += 1
-
-        if self.counter >= self.patience:
-            self.early_stop = True
 
 # ================================
 #     Beefier UNet-like Model
@@ -296,56 +277,43 @@ class DDPM:
             x = self.p_sample(x, label, t_batch)
         return x.clamp(-1, 1)
 
+def visualize_one_sample_per_class(ddpm):
+    ddpm.model.eval()
+    with torch.no_grad():
+        class_labels = torch.arange(0,10).to(ddpm.device)
+        samples = ddpm.sample(class_labels, (10, 3, 32, 32)).cpu()
+        print(samples.min())
+        print(samples.max())
+        samples = (samples + 1) / 2  # De-normalize to [0, 1]
+        class_names = [
+            "airplane", "automobile", "bird", "cat", "deer",
+            "dog", "frog", "horse", "ship", "truck"
+        ]
 
+        fig, axes = plt.subplots(1, 10, figsize=(15, 2))
+        for i, ax in enumerate(axes):
+            img = samples[i]
+            print(img.shape)
+            ax.imshow(img.permute(1, 2, 0))
+            ax.axis("off")
+            ax.set_title(dataset.idx_to_class[class_labels[i].item()], fontsize=8)
+        plt.tight_layout()
+        plt.show()
 
-def main(rank, world_size):
-
-
-    # === DDP Init ===
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-    # === Dataset ===
-  # === Dataset ===
+if __name__=="__main__":
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(device)
+     # === Dataset ===
     transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
+        transforms.Normalize((0.5,), (0.5,))
     ])
-
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
-    val_dataset = CIFAR100LongTail(root='./data', phase='test', imbalance_factor=0.01, transform=transform)
     num_classes = dataset.num_classes
+    
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=128,
-        sampler=sampler,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=128,
-        sampler=val_sampler,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    print(len(dataloader))
-    print(len(val_dataloader))
-
-    # === Model ===
-    # model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
+     # === Model ===
+    # model = UNet(num_classes=num_classes,base_channels=256).to(device)
     model = UNet2DConditionModel(
         sample_size=32,
         in_channels=3,
@@ -357,69 +325,33 @@ def main(rank, world_size):
         class_embed_type="timestep",  # Important for conditional generation
         num_class_embeds=100,  # CIFAR-100
     )
-    model = model.to(rank)
-    betas = linear_beta_schedule(timesteps=400)
+    model.to(device)
 
-    ddpm = DDPM(model,betas)  # Your custom scheduler
-    model = DDP(model, device_ids=[rank])
+
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(pytorch_total_params)
+
+    # Load the saved state_dict
+    state_dict = torch.load("model_saves/studenttddpm__conditional_epoch10.pth",map_location="cuda")
+
+    # Remove 'module.' prefix from keys if present
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("module.", "") if k.startswith("module.") else k
+        new_state_dict[new_key] = v
+
+    # Load into your model
+    model.load_state_dict(new_state_dict)
+    
+    # model.load_state_dict(torch.load("model_saves/ddpm__conditional_epoch_final.pth",weights_only=True))
 
     # === Training ===
-    num_epochs = 250
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
-                                               mode='min',
-                                               factor=0.3,
-                                               patience=10)
-    early_stopper = EarlyStopping(patience=20, min_delta=1e-4)
+    num_epochs = 500
+    optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    betas = linear_beta_schedule(timesteps=400)
 
-    
+    ddpm = DDPM(model,betas)
 
-    for epoch in range(num_epochs):
-        train_loss = 0
-        val_loss = 0
-        #Train
-        sampler.set_epoch(epoch)
-        model.train()
-        for batch in dataloader:
-            x = batch[0].to(ddpm.device)
-            label = batch[1].to(ddpm.device)
-            t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
-            loss = ddpm.p_losses(x, label, t)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    visualize_one_sample_per_class(ddpm)
 
-            train_loss += loss.item()
-
-        #Validation
-        val_sampler.set_epoch(epoch)
-        model.eval()
-        for batch in val_dataloader:
-            x = batch[0].to(ddpm.device)
-            label = batch[1].to(ddpm.device)
-            t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
-            loss = ddpm.p_losses(x, label, t)
-
-            val_loss += loss.item()
-
-        early_stopper(val_loss)
-        if early_stopper.early_stop:
-            print(f"Early stopping triggered at epoch {epoch}. Best val loss: {early_stopper.best_loss:.4f}")
-            break
-
-
-        if epoch%50==0 and rank==0:
-            model_save_file = f"model_saves/ddpm_gamma_conditional_epoch{epoch}.pth"
-            torch.save(model.state_dict(),model_save_file)
-        print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f} / Val Loss = {val_loss:.4f}")
-        print(f"Current learning rate: {scheduler.get_last_lr()}",flush=True)
-        scheduler.step(val_loss)
-
-    if rank==0:
-        model_save_file = f"model_saves/ddpm_gamma_conditional_epoch_final.pth"
-        torch.save(model.state_dict(),model_save_file)
-    dist.destroy_process_group()
-
-if __name__ == "__main__":
-    world_size = torch.cuda.device_count()
-    mp.spawn(main, args=(world_size,), nprocs=world_size)
+   
