@@ -14,7 +14,7 @@ import os
 import pickle
 
 from models import UNet2
-from GammaDDPM import GammaDDPM, Fre
+from GammaDDPM import GammaDDPM, FrechetDDPM
 
 class CIFAR100LongTail(Dataset):
     def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
@@ -361,7 +361,7 @@ def main(rank, world_size):
 
             val_loss += loss.item()
 
-            early_stopper(val_loss)
+        early_stopper(val_loss)
         if early_stopper.early_stop:
             print(f"Early stopping triggered at epoch {epoch}. Best val loss: {early_stopper.best_loss:.4f}")
             break
