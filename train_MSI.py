@@ -12,6 +12,7 @@ from torchvision import transforms
 import numpy as np
 import os
 import pickle
+from diffusers import UNet2DConditionModel
 
 from models import UNet2
 from GammaDDPM import GammaDDPM, FrechetDDPM
@@ -265,16 +266,20 @@ class DDPM:
 
     def p_losses(self, x_start, label, t):
         x_noisy, noise = self.q_sample(x_start, t)
-        predicted = self.model(x_noisy, label, t)
-        return torch.nn.functional.mse_loss(predicted, noise)
+        encoder_hidden_states = torch.zeros((x_start.shape[0], 1, 1280), device=self.device)
+        predicted = self.model(x_noisy, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)  # <- fixed
+        predicted = predicted.sample
+        loss = nn.functional.smooth_l1_loss(predicted, noise)
+        return loss
 
 
     def p_sample(self, x, label, t):
         betas_t = extract(self.betas, t, x.shape)
         alphas_t = extract(self.alphas,t,x.shape)
         alpha_bar_t = extract(self.alpha_bars, t, x.shape)
-        predicted_noise = self.model(x, label, t)
-
+        encoder_hidden_states = torch.zeros((x.shape[0], 1, 1280), device=self.device)
+        predicted_noise = self.model(x, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)
+        predicted_noise = predicted_noise.sample
         mean = (1 / torch.sqrt(alphas_t)) * (
                 x - ((1 - alphas_t) / torch.sqrt(1 - alpha_bar_t)) * predicted_noise)
 
@@ -289,6 +294,7 @@ class DDPM:
             t_batch = torch.tensor([t] * shape[0]).to(self.device)
             x = self.p_sample(x, label, t_batch)
         return x.clamp(-1, 1)
+
 
 
 def main(rank, world_size):
@@ -316,7 +322,18 @@ def main(rank, world_size):
     val_dataloader = DataLoader(val_dataset, batch_size=128, sampler=val_sampler, num_workers=4)
 
     # === Model ===
-    model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
+    # model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
+    model = UNet2DConditionModel(
+        sample_size=32,
+        in_channels=3,
+        out_channels=3,
+        layers_per_block=2,
+        block_out_channels=(128, 128, 256),
+        down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D"),
+        up_block_types=("AttnUpBlock2D", "UpBlock2D", "UpBlock2D"),
+        class_embed_type="timestep",  # Important for conditional generation
+        num_class_embeds=100,  # CIFAR-100
+    )
     model = model.to(rank)
     model = DDP(model, device_ids=[rank])
 
@@ -331,7 +348,7 @@ def main(rank, world_size):
 
     betas = linear_beta_schedule(timesteps=400)
 
-    ddpm = GammaDDPM(model,betas)  # Your custom scheduler
+    ddpm = DDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(num_epochs):
         train_loss = 0
