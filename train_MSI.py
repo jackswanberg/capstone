@@ -326,7 +326,7 @@ def main(rank, world_size):
 
         #Validation
         val_sampler.set_epoch(epoch)
-        model.val()
+        model.eval()
         for batch in val_dataloader:
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
