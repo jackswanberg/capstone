@@ -359,7 +359,7 @@ def main(rank, world_size):
 
     # === Training ===
     num_epochs = 250
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                mode='min',
                                                factor=0.3,
