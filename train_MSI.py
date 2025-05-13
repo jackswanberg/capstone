@@ -331,7 +331,7 @@ def main(rank, world_size):
 
     betas = linear_beta_schedule(timesteps=400)
 
-    ddpm = StudentTDDPM(model,betas)  # Your custom scheduler
+    ddpm = GammaDDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(num_epochs):
         train_loss = 0
@@ -368,13 +368,14 @@ def main(rank, world_size):
 
 
         if epoch%50==0 and rank==0:
-            model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
+            model_save_file = f"model_saves/ddpm_gamma_conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f} / Val Loss = {val_loss:.4f}")
         print(f"Current learning rate: {scheduler.get_last_lr()}")
         scheduler.step(val_loss)
 
-    model_save_file = f"model_saves/ddpm__conditional_epoch_final.pth"
+    if rank==0:
+        model_save_file = f"model_saves/ddpm_gamma_conditional_epoch_final.pth"
     torch.save(model.state_dict(),model_save_file)
     dist.destroy_process_group()
 
