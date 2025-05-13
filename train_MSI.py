@@ -305,7 +305,7 @@ def main(rank, world_size):
                                                patience=10)
     betas = linear_beta_schedule(timesteps=400)
 
-    ddpm = DDPM(model,betas)  # Your custom scheduler
+    ddpm = StudentTDDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(num_epochs):
         train_loss = 0
