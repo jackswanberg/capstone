@@ -14,6 +14,7 @@ import os
 import pickle
 
 from models import UNet2
+from GammaDDPM import GammaDDPM, Fre
 
 class CIFAR100LongTail(Dataset):
     def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
@@ -68,6 +69,29 @@ class ToMinusOneToOne:
 # ================================
 def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
     return torch.linspace(beta_start, beta_end, timesteps)
+
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=0.0):
+        """
+        Args:
+            patience (int): How many epochs to wait after last improvement.
+            min_delta (float): Minimum improvement to qualify as improvement.
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            self.early_stop = True
 
 # ================================
 #     Beefier UNet-like Model
@@ -303,6 +327,8 @@ def main(rank, world_size):
                                                mode='min',
                                                factor=0.3,
                                                patience=10)
+    early_stopper = EarlyStopping(patience=20, min_delta=1e-4)
+
     betas = linear_beta_schedule(timesteps=400)
 
     ddpm = StudentTDDPM(model,betas)  # Your custom scheduler
@@ -334,6 +360,12 @@ def main(rank, world_size):
             loss = ddpm.p_losses(x, label, t)
 
             val_loss += loss.item()
+
+            early_stopper(val_loss)
+        if early_stopper.early_stop:
+            print(f"Early stopping triggered at epoch {epoch}. Best val loss: {early_stopper.best_loss:.4f}")
+            break
+
 
         if epoch%50==0 and rank==0:
             model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
