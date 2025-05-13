@@ -282,10 +282,14 @@ def main(rank, world_size):
         transforms.Normalize((0.5,), (0.5,))
     ])
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
+    val_dataset = CIFAR100LongTail(root='./data', phase='test', imbalance_factor=0.01, transform=transform)
     num_classes = dataset.num_classes
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+
+    dataloader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4)
+    val_dataloader = DataLoader(val_dataset, batch_size=128, sampler=val_sampler, num_workers=4)
 
     # === Model ===
     model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
@@ -294,8 +298,8 @@ def main(rank, world_size):
 
     # === Training ===
     num_epochs = 250
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                mode='min',
                                                factor=0.3,
                                                patience=10)
@@ -304,7 +308,9 @@ def main(rank, world_size):
     ddpm = DDPM(model,betas)  # Your custom scheduler
 
     for epoch in range(num_epochs):
+        #Test
         sampler.set_epoch(epoch)
+        model.train()
         for batch in dataloader:
             x = batch[0].to(ddpm.device)
             label = batch[1].to(ddpm.device)
@@ -313,6 +319,16 @@ def main(rank, world_size):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+        #Validation
+        val_sampler.set_epoch(epoch)
+        model.val()
+        for batch in val_dataloader:
+            x = batch[0].to(ddpm.device)
+            label = batch[1].to(ddpm.device)
+            t = torch.randint(0, ddpm.timesteps, (x.size(0),), device=ddpm.device)
+            loss = ddpm.p_losses(x, label, t)
+
         if epoch%50==0 and rank==0:
             model_save_file = f"model_saves/ddpm__conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
