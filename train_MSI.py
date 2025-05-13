@@ -13,6 +13,8 @@ import numpy as np
 import os
 import pickle
 
+from models import UNet2
+
 class CIFAR100LongTail(Dataset):
     def __init__(self, root, phase='train', imbalance_factor=0.01, transform=None):
         self.root = root
@@ -276,9 +278,8 @@ def main(rank, world_size):
 
     # === Dataset ===
     transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276))
+        transforms.Normalize((0.5,), (0.5,))
     ])
     dataset = CIFAR100LongTail(root='./data', imbalance_factor=0.01, transform=transform)
     num_classes = dataset.num_classes
@@ -287,13 +288,17 @@ def main(rank, world_size):
     dataloader = DataLoader(dataset, batch_size=64, sampler=sampler, num_workers=4)
 
     # === Model ===
-    model = UNet2(in_channels=3, base_channels=128,num_classes=num_classes)
+    model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
     model = model.to(rank)
     model = DDP(model, device_ids=[rank])
 
     # === Training ===
     num_epochs = 500
-    optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                               mode='min',
+                                               factor=0.3,
+                                               patience=10)
     betas = linear_beta_schedule(timesteps=400)
 
     ddpm = DDPM(model,betas)  # Your custom scheduler
