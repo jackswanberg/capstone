@@ -86,7 +86,7 @@ class Upsample(nn.Module):
         return self.conv(x)
 
 class UNet2(nn.Module):
-    def __init__(self, num_classes=100, base_channels=128, time_emb_dim=256):
+    def __init__(self, in_channels=3, num_classes=100, base_channels=128, time_emb_dim=256):
         super().__init__()
         self.time_mlp = nn.Sequential(
             SinusoidalPosEmb(base_channels),
@@ -97,7 +97,7 @@ class UNet2(nn.Module):
         self.class_emb = nn.Embedding(num_classes, time_emb_dim)
 
         # Downsampling path
-        self.init_conv = nn.Conv2d(3, base_channels, kernel_size=3, padding=1)
+        self.init_conv = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
         self.down1 = ResidualBlock(base_channels, base_channels, time_emb_dim)
         self.down2 = ResidualBlock(base_channels, base_channels * 2, time_emb_dim)
         self.down3 = ResidualBlock(base_channels * 2, base_channels * 4, time_emb_dim)
