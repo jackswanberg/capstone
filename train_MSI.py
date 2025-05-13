@@ -26,7 +26,7 @@ class CIFAR100LongTail(Dataset):
         self.imgs, self.labels = self._make_longtail(imbalance_factor)
 
     def _make_longtail(self, imbalance_factor):
-        cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=True)
+        cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=False)
         data, targets = cifar.data, np.array(cifar.targets)
         cls_num = self.num_classes
 
@@ -269,7 +269,7 @@ class DDPM:
         encoder_hidden_states = torch.zeros((x_start.shape[0], 1, 1280), device=self.device)
         predicted = self.model(x_noisy, timestep=t, class_labels=label,encoder_hidden_states=encoder_hidden_states)  # <- fixed
         predicted = predicted.sample
-        loss = nn.functional.smooth_l1_loss(predicted, noise)
+        loss = nn.functional.mse_loss(predicted, noise)
         return loss
 
 
@@ -318,8 +318,8 @@ def main(rank, world_size):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
 
-    dataloader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=4)
-    val_dataloader = DataLoader(val_dataset, batch_size=128, sampler=val_sampler, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=128, sampler=sampler, num_workers=2)
+    val_dataloader = DataLoader(val_dataset, batch_size=128, sampler=val_sampler, num_workers=2)
 
     # === Model ===
     # model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
