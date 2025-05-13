@@ -26,6 +26,7 @@ class CIFAR100LongTail(Dataset):
         self.imgs, self.labels = self._make_longtail(imbalance_factor)
 
     def _make_longtail(self, imbalance_factor):
+        print("Making longtail dataset")
         cifar = CIFAR100(self.root, train=(self.phase == 'train'), download=False)
         data, targets = cifar.data, np.array(cifar.targets)
         cls_num = self.num_classes
@@ -308,6 +309,8 @@ def main(rank, world_size):
 
     # === Dataset ===
     transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
