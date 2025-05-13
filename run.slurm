@@ -11,8 +11,7 @@
 #SBATCH --mail-user=swanb045@umn.edu
 
 module load cuda
-source activate ddpm
-cd capstone
+source activate env
 
 # Run your script
 python -u train_MSI.py
