@@ -341,6 +341,9 @@ def main(rank, world_size):
         persistent_workers=True
     )
 
+    print(len(dataloader))
+    print(len(val_dataloader))
+
     # === Model ===
     # model = UNet2(in_channels=3, base_channels=192,num_classes=num_classes)
     model = UNet2DConditionModel(
