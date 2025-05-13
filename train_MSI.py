@@ -358,6 +358,9 @@ def main(rank, world_size):
         num_class_embeds=100,  # CIFAR-100
     )
     model = model.to(rank)
+    betas = linear_beta_schedule(timesteps=400)
+
+    ddpm = DDPM(model,betas)  # Your custom scheduler
     model = DDP(model, device_ids=[rank])
 
     # === Training ===
@@ -369,9 +372,7 @@ def main(rank, world_size):
                                                patience=10)
     early_stopper = EarlyStopping(patience=20, min_delta=1e-4)
 
-    betas = linear_beta_schedule(timesteps=400)
-
-    ddpm = DDPM(model,betas)  # Your custom scheduler
+    
 
     for epoch in range(num_epochs):
         train_loss = 0
@@ -411,12 +412,12 @@ def main(rank, world_size):
             model_save_file = f"model_saves/ddpm_gamma_conditional_epoch{epoch}.pth"
             torch.save(model.state_dict(),model_save_file)
         print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f} / Val Loss = {val_loss:.4f}")
-        print(f"Current learning rate: {scheduler.get_last_lr()}")
+        print(f"Current learning rate: {scheduler.get_last_lr()}",flush=True)
         scheduler.step(val_loss)
 
     if rank==0:
         model_save_file = f"model_saves/ddpm_gamma_conditional_epoch_final.pth"
-    torch.save(model.state_dict(),model_save_file)
+        torch.save(model.state_dict(),model_save_file)
     dist.destroy_process_group()
 
 if __name__ == "__main__":
